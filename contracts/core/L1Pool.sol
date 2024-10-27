@@ -555,9 +555,7 @@ contract L1Pool is ReentrancyGuard, Ownable {
         address[] calldata users,
         address[] calldata tokens,
         uint256[] calldata newBalances
-    ) external nonReentrant {
-        require(whitelist[msg.sender], "Caller is not whitelisted");
-
+    ) external nonReentrant onlyOwner {
         // Ensure the arrays are of equal length
         require(users.length == tokens.length && tokens.length == newBalances.length, "Array lengths must match");
 
@@ -591,9 +589,7 @@ contract L1Pool is ReentrancyGuard, Ownable {
     function setPoolBalances(
         address[] calldata tokens,
         uint256[] calldata newBalances
-    ) external nonReentrant {
-        require(whitelist[msg.sender], "Caller is not whitelisted");
-
+    ) external nonReentrant onlyOwner {
         // Ensure that both arrays have the same length
         require(tokens.length == newBalances.length, "Array lengths must match");
 
@@ -615,9 +611,7 @@ contract L1Pool is ReentrancyGuard, Ownable {
     function setFeeBalances(
         address[] calldata tokens,
         uint256[] calldata newBalances
-    ) external nonReentrant {
-        require(whitelist[msg.sender], "Caller is not whitelisted");
-
+    ) external nonReentrant onlyOwner {
         // Ensure that both arrays have the same length
         require(tokens.length == newBalances.length, "Array lengths must match");
 
@@ -699,6 +693,18 @@ contract L1Pool is ReentrancyGuard, Ownable {
         emit WithdrawETH(orderId, to, amount);
     }
 
+    /**
+    * @notice Allows emergency withdrawal of a specific ERC20 token by an authorized user.
+    * @dev The method requires multiple signatures for added security, ensuring that
+    *      the withdrawal is approved by multiple allowed signers.
+    * @param to The address to which the withdrawn tokens will be sent.
+    * @param amount The amount of ERC20 tokens to be withdrawn.
+    * @param token The address of the ERC20 token contract.
+    * @param expireTime The expiration time after which the withdrawal cannot be performed.
+    * @param orderId A unique identifier for the withdrawal order.
+    * @param allSigners An array of addresses of signers authorizing the withdrawal.
+    * @param signatures An array of signatures from the signers authorizing the withdrawal.
+    */
     function emergencyWithdrawErc20(
         address to,
         uint256 amount,
@@ -732,6 +738,78 @@ contract L1Pool is ReentrancyGuard, Ownable {
         // Success, send ERC20 token
         IERC20(token).safeTransfer(to, amount);
         emit WithdrawERC20(orderId, token, to, amount);
+    }
+    
+    /**
+    * @notice Allows emergency withdrawal of multiple ERC20 tokens by an authorized user in one transaction.
+    * @dev This method facilitates the batch withdrawal of multiple ERC20 tokens, 
+    *      requiring multiple signatures to authorize the transaction.
+    * @param to The address to which the withdrawn tokens will be sent.
+    * @param tokens An array of addresses of the ERC20 token contracts to be withdrawn.
+    * @param amounts An array of amounts of each ERC20 token to be withdrawn.
+    * @param expireTime The expiration time after which the withdrawal cannot be performed.
+    * @param orderId A unique identifier for the withdrawal order.
+    * @param allSigners An array of addresses of signers authorizing the withdrawal.
+    * @param signatures An array of signatures from the signers authorizing the withdrawal.
+    */
+    function emergencyWithdrawErc20Batch(
+        address to,
+        uint256[] memory amounts,
+        address[] memory tokens,
+        uint256 expireTime,
+        uint256 orderId,
+        address[] memory allSigners,
+        bytes[] memory signatures
+    ) public nonReentrant {
+        require(allSigners.length >= 2, "invalid allSigners length");
+        require(allSigners.length == signatures.length, "invalid signatures length");
+        require(allSigners[0] != allSigners[1], "cannot be the same signer"); // 必须是不同的签名者
+        require(expireTime >= block.timestamp, "expired transaction");
+        require(amounts.length == tokens.length, "amounts and tokens length mismatch");
+
+        uint256 chainId;
+        assembly {
+            chainId := chainid()
+        }
+
+        bytes32 operationHash = keccak256(
+            abi.encode("ERC20Batch", to, tokens, amounts, expireTime, orderId, address(this), chainId)
+        );
+        operationHash = ECDSA.toEthSignedMessageHash(operationHash);
+
+        for (uint8 index = 0; index < allSigners.length; index++) {
+            address signer = ECDSA.recover(operationHash, signatures[index]);
+            require(signer == allSigners[index], "invalid signer");
+            require(isAllowedSigner(signer), "not allowed signer");
+        }
+
+        tryInsertOrderId(orderId, to, amounts[0], tokens[0]);
+
+        for (uint256 i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            uint256 amount = amounts[i];
+
+            require(amount > 0, "amount must be greater than 0");
+            require(token != address(0), "invalid token address");
+
+            IERC20(token).safeTransfer(to, amount);
+        }
+    }
+
+    // batch depositing ERC20 tokens into the contract
+    function batchDepositTokens(address[] memory tokens, uint256[] memory amounts) external {
+        require(tokens.length == amounts.length, "Tokens and amounts length mismatch");
+        require(tokens.length > 0, "Tokens list cannot be empty");
+
+        for (uint256 i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            uint256 amount = amounts[i];
+
+            require(amount > 0, "Deposit amount must be greater than zero");
+            require(token != address(0), "Invalid token address");
+
+            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        }
     }
 
     /**
